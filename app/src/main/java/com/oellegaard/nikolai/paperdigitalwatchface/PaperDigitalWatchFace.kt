@@ -21,11 +21,8 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.res.Resources
-import android.graphics.Canvas
-import android.graphics.Color
-import android.graphics.Paint
-import android.graphics.Rect
-import android.graphics.Typeface
+import android.graphics.*
+import android.graphics.drawable.BitmapDrawable
 import android.os.Bundle
 import android.os.Handler
 import android.os.Message
@@ -35,9 +32,17 @@ import android.support.wearable.watchface.WatchFaceStyle
 import android.text.format.Time
 import android.view.SurfaceHolder
 import android.view.WindowInsets
+import com.manolovn.colorbrewer.ColorBrewer
+import com.manolovn.trianglify.TrianglifyDrawable
+import com.manolovn.trianglify.TrianglifyView
+import com.manolovn.trianglify.domain.Triangle
+import com.manolovn.trianglify.generator.color.ColorGenerator
+import com.manolovn.trianglify.generator.point.RegularPointGenerator
+import com.manolovn.trianglify.renderer.TriangleRenderer
+import com.manolovn.trianglify.triangulator.DelaunayTriangulator
 
 import java.lang.ref.WeakReference
-import java.util.TimeZone
+import java.util.*
 import java.util.concurrent.TimeUnit
 
 /**
@@ -67,10 +72,37 @@ class PaperDigitalWatchFace : CanvasWatchFaceService() {
         }
     }
 
+    inner class PaperColorGenerator () : ColorGenerator {
+        var currentCount = 0
+        val colors = arrayOf(
+                resources.getColor(R.color.blue),
+                resources.getColor(R.color.indigo),
+                resources.getColor(R.color.purple),
+                resources.getColor(R.color.deep_purple)
+        )
+
+        fun resetCount() {
+            currentCount = 0
+        }
+
+        override fun nextColor(): Int {
+            if (currentCount >= colors.size-1) {
+                currentCount = 0
+            } else {
+                currentCount += 1
+            }
+            return colors[currentCount]
+        }
+
+        override fun setCount(count: Int) {
+
+        }
+
+    }
+
     inner class Engine : CanvasWatchFaceService.Engine() {
         internal val mUpdateTimeHandler: Handler = EngineHandler(this)
         internal var mRegisteredTimeZoneReceiver = false
-        internal var mBackgroundPaint: Paint? = null
         internal var mTextPaint: Paint? = null
         internal var mAmbient: Boolean = false
         internal var mTime: Time? = null
@@ -79,12 +111,25 @@ class PaperDigitalWatchFace : CanvasWatchFaceService() {
                 val time = mTime?.let { it } ?: return
                 time.clear(intent.getStringExtra("time-zone"))
                 time.setToNow()
+
             }
         }
         internal var mTapCount: Int = 0
 
         internal var mXOffset: Float = 0.toFloat()
         internal var mYOffset: Float = 0.toFloat()
+
+        // triangles
+        // ~ 360 x 325 px for moto 360
+        internal val BLEED_X = 10
+        internal val BLEED_Y = 10
+        internal val CELL_SIZE = 75
+        internal val VARIANCE = 10
+        internal var triangles: Vector<Triangle>? = null
+        internal val pointGenerator = RegularPointGenerator(CELL_SIZE, VARIANCE)
+        internal val triangulator = DelaunayTriangulator()
+        internal val colorGenerator = this@PaperDigitalWatchFace.PaperColorGenerator()
+        internal var triangleRenderer = TriangleRenderer(colorGenerator)
 
         /**
          * Whether the display supports fewer bits for each color in ambient mode. When true, we
@@ -99,10 +144,10 @@ class PaperDigitalWatchFace : CanvasWatchFaceService() {
             val resources = this@PaperDigitalWatchFace.resources
             mYOffset = resources.getDimension(R.dimen.digital_y_offset)
 
-            mBackgroundPaint = Paint()
-            mBackgroundPaint?.color = resources.getColor(R.color.background)
+            /* Triangle fun */
+            pointGenerator.setBleedX(BLEED_X);
+            pointGenerator.setBleedY(BLEED_Y);
 
-            //mTextPaint = Paint()
             mTextPaint = createTextPaint(resources.getColor(R.color.digital_text))
 
             mTime = Time()
@@ -171,7 +216,6 @@ class PaperDigitalWatchFace : CanvasWatchFaceService() {
                 R.dimen.digital_text_size_round
             else
                 R.dimen.digital_text_size)
-
             mTextPaint?.textSize = textSize
         }
 
@@ -205,6 +249,7 @@ class PaperDigitalWatchFace : CanvasWatchFaceService() {
          * a tap.
          */
         override fun onTapCommand(tapType: Int, x: Int, y: Int, eventTime: Long) {
+            /*
             val resources = this@PaperDigitalWatchFace.resources
             when (tapType) {
                 WatchFaceService.TAP_TYPE_TOUCH -> {
@@ -219,17 +264,29 @@ class PaperDigitalWatchFace : CanvasWatchFaceService() {
                     else
                         R.color.background2)
                 }
-            }// The user has started touching the screen.
+            }*/// The user has started touching the screen.
             // The user has started a different gesture or otherwise cancelled the tap.
             invalidate()
         }
 
+        override fun onSurfaceChanged(holder: SurfaceHolder?, format: Int, width: Int, height: Int) {
+            super.onSurfaceChanged(holder, format, width, height)
+        }
+
         override fun onDraw(canvas: Canvas?, bounds: Rect?) {
+            val height = bounds!!.height()
+            val width = bounds!!.width()
+
             // Draw the background.
             if (isInAmbientMode) {
                 canvas!!.drawColor(Color.BLACK)
             } else {
-                canvas!!.drawRect(0f, 0f, bounds!!.width().toFloat(), bounds.height().toFloat(), mBackgroundPaint)
+                if (triangles == null) {
+                    val points = pointGenerator.generatePoints(width, height);
+                    triangles = triangulator.triangulate(points);
+                }
+                colorGenerator.resetCount()
+                triangleRenderer.render(triangles, canvas);
             }
 
             // Draw H:MM in ambient mode or H:MM:SS in interactive mode.
@@ -238,7 +295,7 @@ class PaperDigitalWatchFace : CanvasWatchFaceService() {
                 String.format("%d:%02d", mTime?.hour, mTime?.minute)
             else
                 String.format("%d:%02d:%02d", mTime?.hour, mTime?.minute, mTime?.second)
-            canvas.drawText(text, mXOffset, mYOffset, mTextPaint)
+            canvas!!.drawText(text, mXOffset, mYOffset, mTextPaint)
         }
 
         /**
